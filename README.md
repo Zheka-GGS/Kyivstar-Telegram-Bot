@@ -1,47 +1,47 @@
-Telegram Bot для Киевстар
-📋 Описание проекта
-Telegram-бот для компании Киевстар, созданный для предоставления информации о тарифах, супер силах и роуминге. Бот имеет полностью украиноязычный интерфейс и расширенную админ-панель для управления контентом.
+Telegram Bot for Kyivstar
+Project Description
+A Telegram bot for Kyivstar, created to provide information about tariffs, super powers, and roaming. The bot features a fully Ukrainian-language interface and an advanced admin panel for content management.
 
-✨ Основные функции
-👤 Для пользователей:
-📋 Отделы - информационные разделы компании
+Main Features
+For Users:
+Departments - Company information sections
 
-💰 Тарифы - просмотр всех доступных тарифных планов
+Rates - View all available tariff plans
 
-💪 Супер силы - дополнительные услуги и опции
+Super Powers - Additional services and options
 
-🌍 Роуминг - тарифы для путешествий за границу
+Roaming - International travel tariffs
 
-💬 Помощь - контактная информация и поддержка
+Help - Contact information and support
 
-⚙️ Настройки - персонализация и дополнительные функции
+Settings - Personalization and additional features
 
-📊 Популярные тарифы - статистика просмотров
+Popular Tariffs - View statistics
 
-👨‍💼 Для администраторов:
-Полноценная админ-панель с аутентификацией
+For Administrators:
+Full-featured admin panel with authentication
 
-Управление отделами (добавление, редактирование, удаление)
+Department management (adding, editing, deleting)
 
-Управление карточками (тарифы, супер силы, роуминг)
+Card management (tariffs, super powers, roaming)
 
-Массовые рассылки сообщений
+Bulk messaging
 
-Статистика использования бота
+Bot usage statistics
 
-Просмотр логов ошибок
+View error logs
 
-Редактирование контента в реальном времени
+Real-time content editing
 
-🛠 Технологии
+Technologies
 Python 3.10+
 
-Aiogram 3.x - асинхронная библиотека для Telegram Bot API
+Aiogram 3.x - Asynchronous library for the Telegram Bot API
 
-SQLite - легковесная база данных
+SQLite - Lightweight database
 
-aiosqlite - асинхронный доступ к SQLite
+aiosqlite - Asynchronous access to SQLite
 
-FSM (Finite State Machine) - для обработки последовательных действий
+FSM (Finite State Machine) - for processing sequential actions
 
-Логирование ошибок в файл и базу данных
+Error logging to a file and database
