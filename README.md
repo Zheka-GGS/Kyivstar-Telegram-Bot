@@ -1,47 +1,33 @@
-Telegram Bot for Kyivstar
-Project Description
-A Telegram bot for Kyivstar, created to provide information about tariffs, super powers, and roaming. The bot features a fully Ukrainian-language interface and an advanced admin panel for content management.
+# Kyivstar Telegram Bot
 
-Main Features
-For Users:
-Departments - Company information sections
+## Description
 
-Rates - View all available tariff plans
+Asynchronous Telegram bot that provides information about tariffs, super packages, roaming and services of Kyivstar. Includes a protected admin panel for dynamic content management.
 
-Super Powers - Additional services and options
+## Technologies
 
-Roaming - International travel tariffs
+- Python 3.11+
+- aiogram 3.x
+- SQLite
+- Finite State Machine (FSM)
+- asyncio
 
-Help - Contact information and support
+## Features
 
-Settings - Personalization and additional features
+- Information about tariffs, services and roaming
+- Protected admin panel with authorization
+- Dynamic content management (add/edit/delete information)
+- Broadcast messaging to all users
+- Usage statistics
+- Full Ukrainian language support
+- Error logging and handling
 
-Popular Tariffs - View statistics
+## Installation
 
-For Administrators:
-Full-featured admin panel with authentication
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
 
-Department management (adding, editing, deleting)
-
-Card management (tariffs, super powers, roaming)
-
-Bulk messaging
-
-Bot usage statistics
-
-View error logs
-
-Real-time content editing
-
-Technologies
-Python 3.10+
-
-Aiogram 3.x - Asynchronous library for the Telegram Bot API
-
-SQLite - Lightweight database
-
-aiosqlite - Asynchronous access to SQLite
-
-FSM (Finite State Machine) - for processing sequential actions
-
-Error logging to a file and database
+Create .env file with bot token
+Run the bot: Bash python bot.py
