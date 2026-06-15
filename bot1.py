@@ -408,7 +408,7 @@ async def update_tariff_card(card_id: int, **kwargs):
         'price': ('price', lambda x: x.strip()),
         'description': ('description', lambda x: x.strip() if x else ''),
         'image_url': ('image_url', lambda x: x if x else ''),
-        'image_file_id': ('image_file_id', lambda x: x if x else ''),
+        'image_file_id': ('image_file_id', lambda x: x if x else ''),   # <-- виправлено
         'is_active': ('is_active', lambda x: 1 if x else 0)
     }
     
@@ -728,7 +728,7 @@ async def display_tariff_cards(message: Message, card_type: str, title: str):
         if not cards:
             await safe_send_message(
                 message.chat.id,
-                f"{title} отсутствуют.",
+                f"{title} відсутні.",
                 reply_markup=get_main_reply_keyboard(),
                 user_id=message.from_user.id
             )
@@ -742,28 +742,33 @@ async def display_tariff_cards(message: Message, card_type: str, title: str):
         
         await safe_send_message(
             message.chat.id,
-            "Выберите действие:",
+            "Виберіть дію:",
             reply_markup=reply_markup,
             user_id=message.from_user.id
         )
     except Exception as e:
-        error_logger.log_error(f"Показать {title}", e, message.from_user.id)
+        error_logger.log_error(f"Показати {title}", e, message.from_user.id)
 
 async def display_single_card(message: Message, card: tuple, show_admin_buttons: bool = True):
     try:
-        card_id, title, price, description, image_url, image_file_id = card
+        # Виправлена розпаковка (6 або 7 елементів)
+        if len(card) == 7:
+            card_id, title, price, description, image_url, image_file_id, card_type = card
+        else:
+            card_id, title, price, description, image_url, image_file_id = card
+            card_type = None
         
         text = (
             f"<b>{title}</b>\n\n"
-            f"💰 <b>Цена:</b> {price}\n"
-            f"📝 <b>Описание:</b> {description or 'Без описания'}"
+            f"💰 <b>Ціна:</b> {price}\n"
+            f"📝 <b>Опис:</b> {description or 'Без опису'}"
         )
         
         keyboard = []
         if show_admin_buttons and await is_admin(message.from_user.id):
             keyboard.append([
-                InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_card_{card_id}"),
-                InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"delete_card_{card_id}")
+                InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"edit_card_{card_id}"),
+                InlineKeyboardButton(text="🗑️ Видалити", callback_data=f"delete_card_{card_id}")
             ])
         
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -789,7 +794,7 @@ async def display_single_card(message: Message, card: tuple, show_admin_buttons:
             user_id=message.from_user.id
         )
     except Exception as e:
-        error_logger.log_error("Отобразить карточку", e, message.from_user.id)
+        error_logger.log_error("Відобразити картку", e, message.from_user.id)
 
 @router.message(F.text == "💰 Тарифы")
 async def show_tariffs(message: Message):
@@ -811,13 +816,13 @@ async def show_help(message: Message):
         text = (
             "💬 <b>Помощь и поддержка:</b>\n\n"
             "📞 <b>Контакты:</b>\n"
-            "• Телефон: <code>0 800 300 460</code>\n"
+            "• Телефон: <code>67 304 99 99</code>\n"
             "• Сайт: kyivstar.ua\n"
-            "• Email: help@kyivstar.ua\n\n"
+            "• Email: -\n\n"
             "🕐 <b>Время работы:</b>\n"
             "Пн-Пт: 9:00-20:00\n"
             "Сб-Вс: 10:00-18:00\n\n"
-            "<i>Вы также можете обратиться к администратору через админ-панель.</i>"
+            "<i>Вы также можете обратиться к администратору через вашего оператора</i>"
         )
         
         await safe_send_message(
@@ -1036,13 +1041,13 @@ async def save_card_edit(message: Message, state: FSMContext):
                 success = await update_tariff_card(
                     card_id,
                     image_url='',
-                    image_file_id=None
+                    image_file_id=''          # <-- виправлено з None
                 )
             else:
                 success = await update_tariff_card(
                     card_id,
                     image_url=message.text,
-                    image_file_id=None
+                    image_file_id=''
                 )
         else:
             value = message.text.strip()
@@ -1244,7 +1249,7 @@ async def admin_add_card_process(message: Message, state: FSMContext):
 async def main():
     try:
         await db_manager.init_db()
-        error_logger.logger.info("🚀 Бот запускается...")
+        error_logger.logger.info("🚀 Бот запускається...")
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
         error_logger.log_error("Критическая ошибка запуска", e)
