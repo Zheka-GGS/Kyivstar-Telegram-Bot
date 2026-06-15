@@ -1,29 +1,34 @@
 import asyncio
 import logging
-import json
 import traceback
 import os
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any, List, Union
+from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardButton, 
+    Message, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton,
-    ReplyKeyboardRemove, PhotoSize, FSInputFile
+    ReplyKeyboardRemove
 )
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
+
 import aiosqlite
 
-# ========== НАСТРОЙКА ЛОГГИРОВАНИЯ ==========
+# ========== НАСТРОЙКА ШЛЯХУ ТА ЗМІННИХ ОТЧЕННЯ ==========
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+
+# ========== НАСТРОЙКА ЛОГУВАННЯ ==========
 class ErrorLogger:
     def __init__(self):
         self.setup_logging()
-    
+
     def setup_logging(self):
         logging.basicConfig(
             level=logging.INFO,
@@ -34,13 +39,13 @@ class ErrorLogger:
             ]
         )
         self.logger = logging.getLogger(__name__)
-    
+
     def log_error(self, context: str, error: Exception, user_id: int = None, additional_info: str = None):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        user_info = f" | Пользователь: {user_id}" if user_id else ""
-        info = f" | Инфо: {additional_info}" if additional_info else ""
+        user_info = f" | Користувач: {user_id}" if user_id else ""
+        info = f" | Інфо: {additional_info}" if additional_info else ""
         
-        error_msg = f"[ОШИБКА] {context}: {str(error)[:200]}{user_info}{info} | Время: {timestamp}"
+        error_msg = f"[ПОМИЛКА] {context}: {str(error)[:200]}{user_info}{info} | Час: {timestamp}"
         
         with open('bot_errors.log', 'a', encoding='utf-8') as f:
             f.write(error_msg + '\n')
@@ -49,9 +54,11 @@ class ErrorLogger:
         
         self.logger.error(error_msg)
         asyncio.create_task(self.log_to_db(user_id, context, str(error)[:500]))
-    
+
     async def log_to_db(self, user_id: int, action_type: str, details: str):
         try:
+            if user_id is None:
+                user_id = 0
             async with aiosqlite.connect('kyivstar_bot.db') as db:
                 await db.execute('''
                     INSERT INTO action_logs (user_id, action_type, action_details)
@@ -59,30 +66,26 @@ class ErrorLogger:
                 ''', (user_id, f"ERROR_{action_type}", details))
                 await db.commit()
         except Exception as e:
-            self.logger.error(f"Ошибка при записи лога в БД: {e}")
+            self.logger.error(f"Помилка при запису лога в БД: {e}")
 
 error_logger = ErrorLogger()
 
-# ========== КОНФИГУРАЦИЯ БОТА ==========
+# ========== КОНФІГУРАЦІЯ БОТА ==========
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "your_secure_password_change_me")
-
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not BOT_TOKEN or BOT_TOKEN == "your_bot_token_here":
-    raise ValueError("❌ BOT_TOKEN не знайдено! Встанови змінну оточення BOT_TOKEN")
+    raise ValueError("❌ BOT_TOKEN не знайдено! Встановіть змінну оточення BOT_TOKEN у файлі .env")
 
-# ========== СОСТОЯНИЯ FSM ==========
+# ========== СТАНИ FSM ==========
 class AdminStates(StatesGroup):
     login = State()
-    create_section_name = State()
-    create_section_description = State()
-    create_section_content = State()
-    broadcast = State()
     add_card = State()
-    edit_card_field = State()
+    edit_card = State()
     edit_section = State()
+    broadcast = State()
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ІНІЦІАЛІЗАЦІЯ ==========
 router = Router()
 admin_router = Router()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -91,51 +94,47 @@ dp = Dispatcher(storage=storage)
 dp.include_router(router)
 dp.include_router(admin_router)
 
-temp_card_data: Dict[int, Dict] = {}
-temp_edit_data: Dict[int, Dict] = {}
-
-# ========== КЛАВИАТУРЫ ==========
+# ========== КЛАВІАТУРИ ==========
 def get_main_reply_keyboard():
     keyboard = [
-        [KeyboardButton(text="📋 Отделы"), KeyboardButton(text="💰 Тарифы")],
-        [KeyboardButton(text="💪 Супер силы"), KeyboardButton(text="🌍 Роуминг")],
-        [KeyboardButton(text="💬 Помощь"), KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="📂 Відділи"), KeyboardButton(text="💰 Тарифи")],
+        [KeyboardButton(text="💪 Супер сили"), KeyboardButton(text="🌍 Роумінг")],
+        [KeyboardButton(text="💬 Допомога"), KeyboardButton(text="⚙️ Налаштування")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_settings_keyboard(is_admin_user: bool = False):
     keyboard = []
-    
     if is_admin_user:
-        keyboard.append([KeyboardButton(text="👨‍💼 Админ-панель")])
+        keyboard.append([KeyboardButton(text="👨‍💼 Адмін-панель")])
     
     keyboard.extend([
-        [KeyboardButton(text="🆔 Мой ID")],
-        [KeyboardButton(text="📊 Популярные тарифы")],
+        [KeyboardButton(text="🆔 Мій ID")],
         [KeyboardButton(text="🔙 Назад")]
     ])
-    
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_admin_keyboard():
     keyboard = [
-        [InlineKeyboardButton(text="➕ Добавить отдел", callback_data="admin_add_section")],
-        [InlineKeyboardButton(text="✏️ Редактировать отдел", callback_data="admin_edit_sections")],
-        [InlineKeyboardButton(text="🗑️ Удалить отдел", callback_data="admin_delete_section")],
-        [InlineKeyboardButton(text="💰 Добавить тариф", callback_data="admin_add_card:tariff")],
-        [InlineKeyboardButton(text="💪 Добавить супер силу", callback_data="admin_add_card:super_power")],
-        [InlineKeyboardButton(text="🌍 Добавить роуминг", callback_data="admin_add_card:roaming")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="📈 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="📋 Логи ошибок", callback_data="admin_error_logs")]
+        [InlineKeyboardButton(text="📂 Відділи (Додати / Редагувати)", callback_data="admin_sections_menu")],
+        [InlineKeyboardButton(text="💰 Тарифи", callback_data="admin_view_cards:tariff"),
+         InlineKeyboardButton(text="💪 Супер сили", callback_data="admin_view_cards:super_power")],
+        [InlineKeyboardButton(text="🌍 Роумінг", callback_data="admin_view_cards:roaming")],
+        [InlineKeyboardButton(text="📢 Розсилка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🔙 Вийти з адмін-панелі", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# ========== БАЗА ДАННЫХ ==========
+def get_cancel_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Скасувати дію", callback_data="cancel_action")]
+    ])
+
+# ========== БАЗА ДАНИХ ==========
 class DatabaseManager:
     def __init__(self):
         self.db_name = 'kyivstar_bot.db'
-    
+
     async def init_db(self):
         try:
             async with aiosqlite.connect(self.db_name) as db:
@@ -144,274 +143,145 @@ class DatabaseManager:
                 await self.create_indexes(db)
                 await self.add_default_data(db)
                 await db.commit()
-                error_logger.logger.info("✅ База данных инициализирована успешно")
+                error_logger.logger.info("✅ База даних ініціалізована успішно")
         except Exception as e:
-            error_logger.log_error("Инициализация БД", e)
+            error_logger.log_error("Ініціалізація БД", e)
             raise
-    
+
     async def create_tables(self, db):
         tables = [
             '''CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                notifications BOOLEAN DEFAULT 1,
-                language TEXT DEFAULT 'uk',
-                is_blocked BOOLEAN DEFAULT 0,
-                block_reason TEXT
+                user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_blocked BOOLEAN DEFAULT 0
             )''',
             '''CREATE TABLE IF NOT EXISTS sections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                description TEXT,
-                content TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_active BOOLEAN DEFAULT 1,
-                display_order INTEGER DEFAULT 0,
-                views INTEGER DEFAULT 0
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT, content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1, display_order INTEGER DEFAULT 0
             )''',
             '''CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                role TEXT DEFAULT 'admin',
-                permissions TEXT DEFAULT 'all',
-                last_login TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            )''',
-            '''CREATE TABLE IF NOT EXISTS login_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                attempts INTEGER DEFAULT 0,
-                last_attempt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                banned_until TIMESTAMP NULL,
-                ip_hash TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, role TEXT DEFAULT 'admin', last_login TIMESTAMP
             )''',
             '''CREATE TABLE IF NOT EXISTS bot_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                description TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_by INTEGER,
-                FOREIGN KEY (updated_by) REFERENCES admins(user_id)
+                key TEXT PRIMARY KEY, value TEXT, description TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''',
             '''CREATE TABLE IF NOT EXISTS tariff_cards (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                price TEXT NOT NULL,
-                description TEXT,
-                image_url TEXT,
-                image_file_id TEXT,
-                card_type TEXT NOT NULL CHECK(card_type IN ('tariff', 'super_power', 'roaming')),
-                is_active BOOLEAN DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                display_order INTEGER DEFAULT 0,
-                views_count INTEGER DEFAULT 0,
-                last_viewed TIMESTAMP,
-                popularity_score FLOAT DEFAULT 0
+                id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, price TEXT NOT NULL, description TEXT,
+                image_url TEXT, image_file_id TEXT, card_type TEXT NOT NULL CHECK(card_type IN ('tariff', 'super_power', 'roaming')),
+                is_active BOOLEAN DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                display_order INTEGER DEFAULT 0
             )''',
             '''CREATE TABLE IF NOT EXISTS action_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                action_type TEXT NOT NULL,
-                action_details TEXT,
-                ip_hash TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )''',
-            '''CREATE TABLE IF NOT EXISTS statistics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE DEFAULT CURRENT_DATE,
-                total_users INTEGER DEFAULT 0,
-                active_users INTEGER DEFAULT 0,
-                new_users INTEGER DEFAULT 0,
-                total_cards INTEGER DEFAULT 0,
-                card_views INTEGER DEFAULT 0,
-                admin_actions INTEGER DEFAULT 0
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action_type TEXT NOT NULL,
+                action_details TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )'''
         ]
-        
         for table_sql in tables:
             await db.execute(table_sql)
-    
+
     async def create_indexes(self, db):
         indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity)",
-            "CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(is_blocked)",
-            "CREATE INDEX IF NOT EXISTS idx_sections_active ON sections(is_active, display_order)",
-            "CREATE INDEX IF NOT EXISTS idx_sections_name ON sections(name)",
             "CREATE INDEX IF NOT EXISTS idx_cards_type_active ON tariff_cards(card_type, is_active, display_order)",
-            "CREATE INDEX IF NOT EXISTS idx_cards_popularity ON tariff_cards(popularity_score DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_cards_views ON tariff_cards(views_count DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(user_id, banned_until)",
-            "CREATE INDEX IF NOT EXISTS idx_action_logs_date ON action_logs(created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_action_logs_user ON action_logs(user_id, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_statistics_date ON statistics(date)"
+            "CREATE INDEX IF NOT EXISTS idx_sections_active ON sections(is_active, display_order)"
         ]
-        
         for index in indexes:
             await db.execute(index)
-    
+
     async def add_default_data(self, db):
-        current_date = datetime.now().strftime('%d.%m.%Y')
-        
-        settings = [           
-            ('maintenance_mode', '0', 'Режим обслуживания'),
-            ('broadcast_enabled', '1', 'Разрешить рассылку'),
-            ('max_login_attempts', '3', 'Максимум попыток входа'),
-            ('ban_duration', '24', 'Длительность бана (часы)'),
-            ('welcome_message', 
-             '👋 Добро пожаловать в бот Киевстар! Выберите раздел:',
-             'Приветственное сообщение')
-        ]
-        
+        settings = [('welcome_message', '👋 Ласкаво просимо до бота Київстар! Оберіть розділ:', 'Привітальне повідомлення')]
         for key, value, desc in settings:
-            await db.execute(
-                'INSERT OR IGNORE INTO bot_settings (key, value, description) VALUES (?, ?, ?)',
-                (key, value, desc)
-            )
+            await db.execute('INSERT OR IGNORE INTO bot_settings (key, value, description) VALUES (?, ?, ?)', (key, value, desc))
         
         test_cards = [
-            ('Стандарт', '150 грн/мес', 'Базовый пакет услуг', '📱', 'tariff'),
-            ('Премиум+', '300 грн/мес', 'Все включено', '🚀', 'tariff'),
-            ('Турбо-интернет', '75 грн/неделя', 'Скорость до 200 Мбит/с', '⚡', 'super_power'),
-            ('Европа Плюс', '400 грн/мес', '30 ГБ в Европе', '🇪🇺', 'roaming'),
-            ('Супер-ночь', '50 грн/мес', 'Безлимитный интернет с 00:00 до 07:00', '🌙', 'super_power')
+            ('Стандарт', '150 грн/міс', 'Базовий пакет послуг', '📱', 'tariff'),
+            ('Турбо-інтернет', '75 грн/тиждень', 'Швидкість до 200 Мбіт/с', '⚡', 'super_power'),
+            ('Європа Плюс', '400 грн/міс', '30 ГБ в Європі', '🇪🇺', 'roaming')
         ]
-        
         for title, price, desc, emoji, card_type in test_cards:
             await db.execute(
-                '''INSERT OR IGNORE INTO tariff_cards 
-                (title, price, description, image_url, card_type) 
-                VALUES (?, ?, ?, ?, ?)''',
+                'INSERT OR IGNORE INTO tariff_cards (title, price, description, image_url, card_type) VALUES (?, ?, ?, ?, ?)',
                 (title, price, desc, emoji, card_type)
             )
-        
-        await db.execute(
-            '''INSERT OR IGNORE INTO statistics (date, total_users, active_users) 
-            VALUES (CURRENT_DATE, 0, 0)'''
-        )
 
 db_manager = DatabaseManager()
 
-# ========== УТИЛИТЫ БАЗЫ ДАННЫХ ==========
+# ========== УТИЛІТИ БАЗИ ДАНИХ ==========
 async def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False):
     try:
         async with aiosqlite.connect(db_manager.db_name) as db:
             cursor = await db.execute(query, params)
-            
             if fetch_one:
                 result = await cursor.fetchone()
             elif fetch_all:
                 result = [row async for row in cursor]
             else:
                 result = cursor.lastrowid
-            
             await db.commit()
             return result
     except Exception as e:
-        error_logger.log_error("SQL запрос", e, additional_info=f"Query: {query[:100]}")
+        error_logger.log_error("SQL запит", e, additional_info=f"Query: {query[:100]}")
         return None
 
 async def add_user(user_id: int, username: str, first_name: str, last_name: str = None):
-    query = '''
-    INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, last_activity)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    '''
-    await execute_query(query, (user_id, username, first_name, last_name))
-    await log_action(user_id, 'user_register', f'Регистрация: {first_name}')
+    await execute_query(
+        'INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, last_activity) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)',
+        (user_id, username, first_name, last_name)
+    )
 
 async def update_user_activity(user_id: int):
-    query = 'UPDATE users SET last_activity = CURRENT_TIMESTAMP WHERE user_id = ?'
-    await execute_query(query, (user_id,))
+    await execute_query('UPDATE users SET last_activity = CURRENT_TIMESTAMP WHERE user_id = ?', (user_id,))
 
 async def get_all_users():
-    query = 'SELECT user_id FROM users WHERE is_blocked = 0'
-    result = await execute_query(query, fetch_all=True)
+    result = await execute_query('SELECT user_id FROM users WHERE is_blocked = 0', fetch_all=True)
     return [row[0] for row in result] if result else []
 
 async def is_admin(user_id: int) -> bool:
-    query = 'SELECT 1 FROM admins WHERE user_id = ?'
-    result = await execute_query(query, (user_id,), fetch_one=True)
+    result = await execute_query('SELECT 1 FROM admins WHERE user_id = ?', (user_id,), fetch_one=True)
     return result is not None
 
 async def add_admin(user_id: int, username: str, first_name: str, last_name: str):
-    query = '''
-    INSERT OR REPLACE INTO admins (user_id, username, first_name, last_name, last_login)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    '''
-    await execute_query(query, (user_id, username, first_name, last_name))
-    await log_action(user_id, 'admin_added', f'Добавлен админ: {username}')
+    await execute_query(
+        'INSERT OR REPLACE INTO admins (user_id, username, first_name, last_name, last_login) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)',
+        (user_id, username, first_name, last_name)
+    )
 
 async def get_setting(key: str):
-    query = 'SELECT value FROM bot_settings WHERE key = ?'
-    result = await execute_query(query, (key,), fetch_one=True)
+    result = await execute_query('SELECT value FROM bot_settings WHERE key = ?', (key,), fetch_one=True)
     return result[0] if result else None
 
 async def get_tariff_cards(card_type: str):
     query = '''
-    SELECT id, title, price, description, image_url, image_file_id 
-    FROM tariff_cards 
-    WHERE card_type = ? AND is_active = 1
-    ORDER BY display_order, popularity_score DESC, id
+        SELECT id, title, price, description, image_url, image_file_id, card_type
+        FROM tariff_cards WHERE card_type = ? AND is_active = 1
+        ORDER BY display_order, id
     '''
     return await execute_query(query, (card_type,), fetch_all=True)
 
 async def get_tariff_card(card_id: int):
-    query = '''
-    SELECT id, title, price, description, image_url, image_file_id, card_type 
-    FROM tariff_cards WHERE id = ?
-    '''
-    card = await execute_query(query, (card_id,), fetch_one=True)
-    
-    if card:
-        await execute_query(
-            'UPDATE tariff_cards SET views_count = views_count + 1, last_viewed = CURRENT_TIMESTAMP WHERE id = ?',
-            (card_id,)
-        )
-    
-    return card
+    query = 'SELECT id, title, price, description, image_url, image_file_id, card_type FROM tariff_cards WHERE id = ?'
+    return await execute_query(query, (card_id,), fetch_one=True)
 
 async def add_tariff_card(title: str, price: str, description: str, image_url: str, image_file_id: str, card_type: str):
     query = '''
-    INSERT INTO tariff_cards (title, price, description, image_url, image_file_id, card_type)
-    VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO tariff_cards (title, price, description, image_url, image_file_id, card_type)
+        VALUES (?, ?, ?, ?, ?, ?)
     '''
-    card_id = await execute_query(
-        query, 
-        (title.strip(), price.strip(), description.strip() if description else '',
-         image_url if image_url else '', image_file_id if image_file_id else '', card_type)
-    )
-    
-    if card_id:
-        await log_action(None, 'card_created', f'{card_type}: {title}')
-    
-    return card_id
+    return await execute_query(query, (title.strip(), price.strip(), description.strip() if description else '', image_url or '', image_file_id or '', card_type))
 
 async def update_tariff_card(card_id: int, **kwargs):
     if not kwargs:
         return True
-    
-    fields = []
-    params = []
-    
+    fields, params = [], []
     field_mapping = {
-        'title': ('title', lambda x: x.strip()),
-        'price': ('price', lambda x: x.strip()),
-        'description': ('description', lambda x: x.strip() if x else ''),
-        'image_url': ('image_url', lambda x: x if x else ''),
-        'image_file_id': ('image_file_id', lambda x: x if x else ''),   # <-- виправлено
+        'title': ('title', lambda x: str(x).strip()),
+        'price': ('price', lambda x: str(x).strip()),
+        'description': ('description', lambda x: str(x).strip() if x else ''),
+        'image_url': ('image_url', lambda x: str(x) if x else ''),
+        'image_file_id': ('image_file_id', lambda x: str(x) if x else ''),
         'is_active': ('is_active', lambda x: 1 if x else 0)
     }
-    
     for key, value in kwargs.items():
         if key in field_mapping:
             db_field, processor = field_mapping[key]
@@ -420,830 +290,683 @@ async def update_tariff_card(card_id: int, **kwargs):
     
     if not fields:
         return False
-    
     fields.append("updated_at = CURRENT_TIMESTAMP")
     params.append(card_id)
     
     query = f"UPDATE tariff_cards SET {', '.join(fields)} WHERE id = ?"
-    
-    result = await execute_query(query, tuple(params))
-    await log_action(None, 'card_updated', f'Карточка {card_id}')
-    return result is not None
+    return (await execute_query(query, tuple(params))) is not None
 
 async def delete_tariff_card(card_id: int):
-    query = 'UPDATE tariff_cards SET is_active = 0 WHERE id = ?'
-    result = await execute_query(query, (card_id,))
-    
-    if result is not None:
-        await log_action(None, 'card_deleted', f'Карточка {card_id}')
-        return True
-    return False
-
-async def get_popular_cards(limit: int = 5):
-    query = '''
-    SELECT id, title, price, card_type, views_count
-    FROM tariff_cards 
-    WHERE is_active = 1
-    ORDER BY popularity_score DESC, views_count DESC
-    LIMIT ?
-    '''
-    return await execute_query(query, (limit,), fetch_all=True)
+    return (await execute_query('UPDATE tariff_cards SET is_active = 0 WHERE id = ?', (card_id,))) is not None
 
 async def get_sections():
-    query = '''
-    SELECT id, name, description, content 
-    FROM sections 
-    WHERE is_active = 1 
-    ORDER BY display_order, id
-    '''
-    return await execute_query(query, fetch_all=True)
+    return await execute_query('SELECT id, name, description, content FROM sections WHERE is_active = 1 ORDER BY display_order, id', fetch_all=True)
 
 async def get_section(section_id: int):
-    query = 'SELECT id, name, description, content FROM sections WHERE id = ?'
-    return await execute_query(query, (section_id,), fetch_one=True)
-
-async def add_section(name: str, description: str, content: str):
-    query = 'INSERT INTO sections (name, description, content) VALUES (?, ?, ?)'
-    section_id = await execute_query(query, (name, description, content))
-    
-    if section_id:
-        await log_action(None, 'section_created', f'Отдел: {name}')
-    
-    return section_id
+    return await execute_query('SELECT id, name, description, content FROM sections WHERE id = ?', (section_id,), fetch_one=True)
 
 async def update_section(section_id: int, name: str, description: str, content: str):
-    query = '''
-    UPDATE sections 
-    SET name = ?, description = ?, content = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-    '''
-    result = await execute_query(query, (name, description, content, section_id))
-    
-    if result is not None:
-        await log_action(None, 'section_updated', f'Отдел {section_id}')
-        return True
-    return False
+    return (await execute_query(
+        'UPDATE sections SET name = ?, description = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        (name, description, content, section_id)
+    )) is not None
 
 async def delete_section(section_id: int):
-    query = 'UPDATE sections SET is_active = 0 WHERE id = ?'
-    result = await execute_query(query, (section_id,))
-    
-    if result is not None:
-        await log_action(None, 'section_deleted', f'Отдел {section_id}')
-        return True
-    return False
+    return (await execute_query('UPDATE sections SET is_active = 0 WHERE id = ?', (section_id,))) is not None
 
-async def log_action(user_id: int, action_type: str, details: str = None):
-    query = '''
-    INSERT INTO action_logs (user_id, action_type, action_details)
-    VALUES (?, ?, ?)
-    '''
-    await execute_query(query, (user_id, action_type, details))
-
-# ========== УТИЛИТЫ ОТПРАВКИ ==========
+# ========== УТИЛІТИ ВІДПРАВКИ ==========
 async def safe_send_message(chat_id: int, text: str, reply_markup=None, parse_mode: str = 'HTML', user_id: int = None):
     try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode
-        )
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
         return True
     except Exception as e:
-        error_logger.log_error("Отправка сообщения", e, user_id, f"Текст: {text[:50]}")
+        error_logger.log_error("Відправка повідомлення", e, user_id, f"Текст: {text[:50]}")
         return False
 
-async def safe_edit_message(message_or_callback, text: str, reply_markup=None, parse_mode: str = 'HTML'):
+async def safe_edit_message(target: Union[Message, CallbackQuery], text: str, reply_markup=None, parse_mode: str = 'HTML'):
     try:
-        if isinstance(message_or_callback, CallbackQuery):
-            await message_or_callback.message.edit_text(
-                text=text,
+        msg = target.message if isinstance(target, CallbackQuery) else target
+        if msg.photo:
+            await msg.edit_caption(
+                caption=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode
             )
         else:
-            await message_or_callback.edit_text(
+            await msg.edit_text(
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode
             )
         return True
+        
     except Exception as e:
-        error_logger.log_error("Редактирование сообщения", e)
+        error_logger.log_error("Редагування повідомлення", e)
+        try:
+            await msg.delete()
+            if msg.photo:
+                await msg.answer_photo(
+                    photo=msg.photo[-1].file_id,
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+            else:
+                await msg.answer(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+        except Exception as fallback_e:
+            error_logger.log_error("Fallback відправка замість редагування", fallback_e)
+            
         return False
 
-# ========== ОСНОВНЫЕ ХЕНДЛЕРЫ ==========
+# ========== ВІДОБРАЖЕННЯ КАРТОК ==========
+async def display_tariff_cards(target: Union[Message, CallbackQuery], card_type: str, title: str, user_id: int):
+    try:
+        await update_user_activity(user_id)
+        cards = await get_tariff_cards(card_type)
+        
+        if not cards:
+            text = f"📭 {title} відсутні."
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔙 До адмін-панелі", callback_data="back_to_admin")
+            ]])
+            if isinstance(target, CallbackQuery):
+                await safe_edit_message(target, text, reply_markup)
+            else:
+                await safe_send_message(target.chat.id, text, reply_markup, user_id=user_id)
+            return
+
+        header_text = f"📋 <b>Список: {title}</b>\n(Всього: {len(cards)})"
+        if isinstance(target, CallbackQuery):
+            await safe_edit_message(target, header_text)
+        else:
+            await safe_send_message(target.chat.id, header_text, user_id=user_id)
+
+        for card in cards:
+            await display_single_card(target, card, user_id)
+
+    except Exception as e:
+        error_logger.log_error(f"Показати {title}", e, user_id)
+
+async def display_single_card(target: Union[Message, CallbackQuery], card: tuple, user_id: int):
+    try:
+        if len(card) >= 7:
+            card_id, title, price, description, image_url, image_file_id, card_type = card[:7]
+        else:
+            card_id, title, price, description, image_url, image_file_id = card[:6]
+            card_type = 'tariff'
+
+        text = f"📌 <b>{title}</b>\n\n💰 <b>Ціна:</b> {price}\n📝 <b>Опис:</b> {description or 'Немає опису'}"
+
+        keyboard = []
+        if await is_admin(user_id):
+            keyboard.append([
+                InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"admin_edit_card:{card_id}"),
+                InlineKeyboardButton(text="🗑️ Видалити", callback_data=f"admin_delete_card:{card_id}")
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton(text="🔙 До списку", callback_data=f"admin_view_cards:{card_type}")
+        ])
+
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        msg_target = target.message if isinstance(target, CallbackQuery) else target
+
+        if image_file_id:
+            try:
+                await msg_target.answer_photo(photo=image_file_id, caption=text, reply_markup=reply_markup, parse_mode='HTML')
+            except Exception as photo_error:
+                error_logger.log_error("Відправка фото картки", photo_error, user_id, f"Card {card_id}")
+                await msg_target.answer(text=text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            if image_url:
+                text = f"{image_url}\n\n{text}"
+            await msg_target.answer(text=text, reply_markup=reply_markup, parse_mode='HTML')
+
+    except Exception as e:
+        error_logger.log_error("display_single_card", e, user_id)
+
+# ========== ОСНОВНІ ХЕНДЛЕРИ ==========
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     try:
         user = message.from_user
         await add_user(user.id, user.username, user.first_name, user.last_name)
-        
-        welcome = await get_setting('welcome_message') or '👋 Добро пожаловать!'
-        await message.answer(
-            f"{welcome}\n\nПривет, {user.first_name}!",
-            reply_markup=get_main_reply_keyboard()
-        )
+        welcome = await get_setting('welcome_message') or '👋 Ласкаво просимо!'
+        await message.answer(f"{welcome}\n\nПривіт, {user.first_name}!", reply_markup=get_main_reply_keyboard())
     except Exception as e:
         error_logger.log_error("/start", e, message.from_user.id)
-        await message.answer("❌ Ошибка при запуске бота.")
+        await message.answer("❌ Помилка при запуску бота.")
 
 @router.message(F.text == "🔙 Назад")
 async def back_to_main(message: Message):
-    try:
-        await safe_send_message(
-            message.chat.id,
-            "🏠 <b>Главное меню</b>",
-            reply_markup=get_main_reply_keyboard(),
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Назад в главное", e, message.from_user.id)
+    await safe_send_message(message.chat.id, "🏠 <b>Головне меню</b>", reply_markup=get_main_reply_keyboard(), user_id=message.from_user.id)
 
-@router.message(F.text == "⚙️ Настройки")
+@router.message(F.text == "⚙️ Налаштування")
 async def settings_menu(message: Message):
-    try:
-        await update_user_activity(message.from_user.id)
-        is_admin_user = await is_admin(message.from_user.id)
-        
-        await safe_send_message(
-            message.chat.id,
-            "⚙️ <b>Настройки</b>\nВыберите раздел:",
-            reply_markup=get_settings_keyboard(is_admin_user),
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Меню настроек", e, message.from_user.id)
+    is_admin_user = await is_admin(message.from_user.id)
+    await safe_send_message(message.chat.id, "⚙️ <b>Налаштування</b>\nОберіть розділ:", reply_markup=get_settings_keyboard(is_admin_user), user_id=message.from_user.id)
 
-@router.message(F.text == "🆔 Мой ID")
+@router.message(F.text == "🆔 Мій ID")
 async def show_my_id(message: Message):
-    try:
-        user = message.from_user
-        await update_user_activity(user.id)
-        is_admin_user = await is_admin(user.id)
-        
-        text = (
-            f"🆔 <b>Ваш профиль:</b>\n\n"
-            f"• <b>ID:</b> <code>{user.id}</code>\n"
-            f"• <b>Имя:</b> {user.first_name}\n"
-            f"• <b>Username:</b> @{user.username if user.username else 'нет'}\n"
-            f"• <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
-        
-        await safe_send_message(
-            message.chat.id,
-            text,
-            reply_markup=get_settings_keyboard(is_admin_user),
-            user_id=user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Показать ID", e, message.from_user.id)
+    user = message.from_user
+    is_admin_user = await is_admin(user.id)
+    text = (
+        f"🆔 <b>Ваш профіль:</b>\n\n"
+        f"• <b>ID:</b> <code>{user.id}</code>\n"
+        f"• <b>Ім'я:</b> {user.first_name}\n"
+        f"• <b>Username:</b> @{user.username or 'немає'}\n"
+        f"• <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    )
+    await safe_send_message(message.chat.id, text, reply_markup=get_settings_keyboard(is_admin_user), user_id=user.id)
 
-@router.message(F.text == "📊 Популярные тарифы")
-async def show_popular_tariffs(message: Message):
-    try:
-        await update_user_activity(message.from_user.id)
-        popular = await get_popular_cards(5)
-        
-        if not popular:
-            await safe_send_message(
-                message.chat.id,
-                "Популярные тарифы пока отсутствуют.",
-                reply_markup=get_settings_keyboard(),
-                user_id=message.from_user.id
-            )
-            return
-        
-        text = "🔥 <b>Самые популярные тарифы:</b>\n\n"
-        for i, (card_id, title, price, card_type, views) in enumerate(popular, 1):
-            emoji = "💰" if card_type == 'tariff' else "💪" if card_type == 'super_power' else "🌍"
-            text += f"{i}. {emoji} <b>{title}</b>\n"
-            text += f"   💰 {price}\n"
-            text += f"   👁️ {views} просмотров\n\n"
-        
-        await safe_send_message(
-            message.chat.id,
-            text,
-            reply_markup=get_settings_keyboard(),
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Популярные тарифы", e, message.from_user.id)
+@router.message(F.text == "💰 Тарифи")
+async def show_tariffs(message: Message):
+    await display_tariff_cards(message, 'tariff', 'Тарифи', message.from_user.id)
 
-@router.message(F.text == "📋 Отделы")
+@router.message(F.text == "💪 Супер сили")
+async def show_super_powers(message: Message):
+    await display_tariff_cards(message, 'super_power', 'Супер сили', message.from_user.id)
+
+@router.message(F.text == "🌍 Роумінг")
+async def show_roaming(message: Message):
+    await display_tariff_cards(message, 'roaming', 'Роумінг', message.from_user.id)
+
+@router.message(F.text == "📂 Відділи")
 async def show_sections_menu(message: Message):
-    try:
-        await update_user_activity(message.from_user.id)
-        sections = await get_sections()
-        
-        if not sections:
-            await safe_send_message(
-                message.chat.id,
-                "Отделы отсутствуют.",
-                reply_markup=get_main_reply_keyboard(),
-                user_id=message.from_user.id
-            )
-            return
-        
-        keyboard = []
-        for section_id, name, description, _ in sections:
-            keyboard.append([InlineKeyboardButton(text=name, callback_data=f"section_{section_id}")])
-        
-        keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        
-        await safe_send_message(
-            message.chat.id,
-            "📂 <b>Отделы:</b>\nВыберите отдел:",
-            reply_markup=reply_markup,
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Показать отделы", e, message.from_user.id)
+    sections = await get_sections()
+    if not sections:
+        await safe_send_message(message.chat.id, "📭 Відділи відсутні.", reply_markup=get_main_reply_keyboard(), user_id=message.from_user.id)
+        return
+    
+    keyboard = [[InlineKeyboardButton(text=name, callback_data=f"section_{section_id}")] for section_id, name, _, _ in sections]
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
+    
+    await safe_send_message(message.chat.id, "📂 <b>Відділи:</b>\nОберіть відділ:", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), user_id=message.from_user.id)
 
 @router.callback_query(F.data.startswith("section_"))
 async def show_section(callback: CallbackQuery):
-    try:
-        await update_user_activity(callback.from_user.id)
-        section_id = int(callback.data.split('_')[1])
-        section = await get_section(section_id)
-        
-        if not section:
-            await callback.answer("❌ Отдел не найден")
-            return
-        
-        _, name, description, content = section
-        
-        await execute_query(
-            'UPDATE sections SET views = views + 1 WHERE id = ?',
-            (section_id,)
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton(text="🔙 Назад к отделам", callback_data="back_to_sections")],
-        ]
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        
-        await safe_edit_message(
-            callback,
-            f"<b>{name}</b>\n\n{description}\n\n{content}",
-            reply_markup
-        )
-    except Exception as e:
-        error_logger.log_error("Показать отдел", e, callback.from_user.id)
-        await callback.answer("❌ Ошибка")
+    section_id = int(callback.data.split('_')[1])
+    section = await get_section(section_id)
+    if not section:
+        return await callback.answer("❌ Відділ не знайдено", show_alert=True)
+    
+    _, name, description, content = section
+    keyboard = [[InlineKeyboardButton(text="🔙 Назад до відділів", callback_data="back_to_sections")]]
+    await safe_edit_message(callback, f"<b>{name}</b>\n\n{description}\n\n{content}", InlineKeyboardMarkup(inline_keyboard=keyboard))
 
 @router.callback_query(F.data == "back_to_sections")
 async def back_to_sections(callback: CallbackQuery):
-    try:
-        await update_user_activity(callback.from_user.id)
-        sections = await get_sections()
-        
-        if not sections:
-            await safe_edit_message(callback, "Отделы отсутствуют.")
-            return
-        
-        keyboard = []
-        for section_id, name, description, _ in sections:
-            keyboard.append([InlineKeyboardButton(text=name, callback_data=f"section_{section_id}")])
-        
-        keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        
-        await safe_edit_message(
-            callback,
-            "📂 <b>Отделы:</b>\nВыберите отдел:",
-            reply_markup
-        )
-    except Exception as e:
-        error_logger.log_error("Назад к отделам", e, callback.from_user.id)
+    sections = await get_sections()
+    if not sections:
+        return await safe_edit_message(callback, "📭 Відділи відсутні.")
+    
+    keyboard = [[InlineKeyboardButton(text=name, callback_data=f"section_{section_id}")] for section_id, name, _, _ in sections]
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
+    await safe_edit_message(callback, "📂 <b>Відділи:</b>\nОберіть відділ:", InlineKeyboardMarkup(inline_keyboard=keyboard))
 
-# ========== ТАРИФЫ И КАРТОЧКИ ==========
-async def display_tariff_cards(message: Message, card_type: str, title: str):
-    try:
-        await update_user_activity(message.from_user.id)
-        cards = await get_tariff_cards(card_type)
-        
-        if not cards:
-            await safe_send_message(
-                message.chat.id,
-                f"{title} відсутні.",
-                reply_markup=get_main_reply_keyboard(),
-                user_id=message.from_user.id
-            )
-            return
-        
-        for card in cards:
-            await display_single_card(message, card)
-        
-        keyboard = [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]]
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        
-        await safe_send_message(
-            message.chat.id,
-            "Виберіть дію:",
-            reply_markup=reply_markup,
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error(f"Показати {title}", e, message.from_user.id)
+@router.callback_query(F.data == "back_to_main")
+async def back_to_main_cb(callback: CallbackQuery):
+    await safe_edit_message(callback, "🏠 <b>Головне меню</b>", get_main_reply_keyboard())
 
-async def display_single_card(message: Message, card: tuple, show_admin_buttons: bool = True):
-    try:
-        # Виправлена розпаковка (6 або 7 елементів)
-        if len(card) == 7:
-            card_id, title, price, description, image_url, image_file_id, card_type = card
-        else:
-            card_id, title, price, description, image_url, image_file_id = card
-            card_type = None
-        
-        text = (
-            f"<b>{title}</b>\n\n"
-            f"💰 <b>Ціна:</b> {price}\n"
-            f"📝 <b>Опис:</b> {description or 'Без опису'}"
-        )
-        
-        keyboard = []
-        if show_admin_buttons and await is_admin(message.from_user.id):
-            keyboard.append([
-                InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"edit_card_{card_id}"),
-                InlineKeyboardButton(text="🗑️ Видалити", callback_data=f"delete_card_{card_id}")
-            ])
-        
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
-        
-        if image_file_id:
-            try:
-                await message.answer_photo(
-                    photo=image_file_id,
-                    caption=text,
-                    reply_markup=reply_markup
-                )
-                return
-            except Exception:
-                pass
-        
-        if image_url:
-            text = f"{image_url} {text}"
-        
-        await safe_send_message(
-            message.chat.id,
-            text,
-            reply_markup=reply_markup,
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Відобразити картку", e, message.from_user.id)
+@router.callback_query(F.data == "back_to_admin")
+async def back_to_admin_cb(callback: CallbackQuery):
+    if await is_admin(callback.from_user.id):
+        await safe_edit_message(callback, "👨‍💼 <b>Адмін-панель</b>\nОберіть дію:", get_admin_keyboard())
+    else:
+        await safe_edit_message(callback, "🏠 <b>Головне меню</b>", get_main_reply_keyboard())
 
-@router.message(F.text == "💰 Тарифы")
-async def show_tariffs(message: Message):
-    await display_tariff_cards(message, 'tariff', 'Тарифы')
-
-@router.message(F.text == "💪 Супер силы")
-async def show_super_powers(message: Message):
-    await display_tariff_cards(message, 'super_power', 'Супер силы')
-
-@router.message(F.text == "🌍 Роуминг")
-async def show_roaming(message: Message):
-    await display_tariff_cards(message, 'roaming', 'Роуминг')
-
-@router.message(F.text == "💬 Помощь")
+# ========== ДОПОМОГА (ВИПРАВЛЕНО) ==========
+@router.message(F.text == "💬 Допомога")
 async def show_help(message: Message):
     try:
         await update_user_activity(message.from_user.id)
-        
         text = (
-            "💬 <b>Помощь и поддержка:</b>\n\n"
-            "📞 <b>Контакты:</b>\n"
-            "• Телефон: <code>67 304 99 99</code>\n"
-            "• Сайт: kyivstar.ua\n"
-            "• Email: -\n\n"
-            "🕐 <b>Время работы:</b>\n"
-            "Пн-Пт: 9:00-20:00\n"
-            "Сб-Вс: 10:00-18:00\n\n"
-            "<i>Вы также можете обратиться к администратору через вашего оператора</i>"
+            "💬 <b>Допомога та підтримка:</b>\n\n"
+            "📞 <b>Контакти:</b>\n"
+            "• Телефон: <code>067 304 9999</code>\n"
+            "• Додаток(Android): https://play.google.com/store/apps/details?id=com.kyivstar.mykyivstar \n"
+            "• Додаток(iOS): https://apps.apple.com/ua/app/мій-київстар-інтернет-дзвінки/id771788824 \n\n"
+            "🕐 <b>Час роботи підтримки:</b>\n"
+            "Пн-Пт: 09:00-18:00\n\n"
+            "<i>Якщо у вас виникли технічні проблеми з роботою бота, зверніться до адміністратора системи.</i>"
         )
-        
-        await safe_send_message(
-            message.chat.id,
-            text,
-            reply_markup=get_main_reply_keyboard(),
-            user_id=message.from_user.id
-        )
+        await safe_send_message(message.chat.id, text, reply_markup=get_main_reply_keyboard(), user_id=message.from_user.id)
     except Exception as e:
-        error_logger.log_error("Помощь", e, message.from_user.id)
+        error_logger.log_error("Допомога", e, message.from_user.id)
 
-# ========== АДМИН СИСТЕМА ==========
-@router.message(F.text == "👨‍💼 Админ-панель")
+# ========== АДМІН СИСТЕМА ==========
+@router.message(F.text == "👨‍💼 Адмін-панель")
 async def admin_panel_menu(message: Message, state: FSMContext):
-    try:
-        user_id = message.from_user.id
-        await update_user_activity(user_id)
-        
-        if await is_admin(user_id):
-            await show_admin_panel_internal(message)
-            return
-        
-        await safe_send_message(
-            message.chat.id,
-            "🔐 <b>Вход в админ-панель</b>\n\nВведите пароль:",
-            reply_markup=ReplyKeyboardRemove(),
-            user_id=user_id
-        )
+    user_id = message.from_user.id
+    if await is_admin(user_id):
+        await safe_send_message(message.chat.id, "👨‍💼 <b>Адмін-панель</b>\nОберіть дію:", reply_markup=get_admin_keyboard(), user_id=user_id)
+    else:
+        await safe_send_message(message.chat.id, "🔐 <b>Вхід в адмін-панель</b>\n\nВведіть пароль:", reply_markup=ReplyKeyboardRemove(), user_id=user_id)
         await state.set_state(AdminStates.login)
-    except Exception as e:
-        error_logger.log_error("Вход в админку", e, message.from_user.id)
 
 @router.message(AdminStates.login)
 async def admin_login_check(message: Message, state: FSMContext):
-    try:
-        user_id = message.from_user.id
-        password = message.text.strip()
-        
-        if password == ADMIN_PASSWORD:
-            user = message.from_user
-            await add_admin(user.id, user.username, user.first_name, user.last_name)
-            
-            await safe_send_message(
-                message.chat.id,
-                "✅ Вход выполнен! Доступ предоставлен.",
-                reply_markup=get_main_reply_keyboard(),
-                user_id=user_id
-            )
-            await show_admin_panel_internal(message)
-            await state.clear()
-        else:
-            await safe_send_message(
-                message.chat.id,
-                "❌ Неверный пароль!",
-                user_id=user_id
-            )
-    except Exception as e:
-        error_logger.log_error("Проверка пароля", e, message.from_user.id)
+    user_id = message.from_user.id
+    if message.text.strip() == ADMIN_PASSWORD:
+        user = message.from_user
+        await add_admin(user.id, user.username, user.first_name, user.last_name)
+        await safe_send_message(message.chat.id, "✅ Вхід виконано! Доступ надано.", reply_markup=get_main_reply_keyboard(), user_id=user_id)
+        await safe_send_message(message.chat.id, "👨‍💼 <b>Адмін-панель</b>\nОберіть дію:", reply_markup=get_admin_keyboard(), user_id=user_id)
+        await state.clear()
+    else:
+        await safe_send_message(message.chat.id, "❌ Невірний пароль!", user_id=user_id)
         await state.clear()
 
-async def show_admin_panel_internal(message: Message):
-    try:
-        await safe_send_message(
-            message.chat.id,
-            "👨‍💼 <b>Админ-панель</b>\nВыберите действие:",
-            reply_markup=get_admin_keyboard(),
-            user_id=message.from_user.id
-        )
-    except Exception as e:
-        error_logger.log_error("Показать админ-панель", e, message.from_user.id)
-
-# ========== АДМИН: РЕДАКТИРОВАНИЕ КАРТОЧЕК ==========
-@admin_router.callback_query(F.data.startswith("edit_card_"))
-async def admin_edit_card_start(callback: CallbackQuery):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_id = int(callback.data.split('_')[-1])
-        card = await get_tariff_card(card_id)
-        
-        if not card:
-            await callback.answer("❌ Карточка не найдена")
-            return
-        
-        card_id, title, price, description, image_url, image_file_id, card_type = card
-        
-        keyboard = [
-            [InlineKeyboardButton(text="✏️ Название", callback_data=f"edit_title_{card_id}")],
-            [InlineKeyboardButton(text="✏️ Цена", callback_data=f"edit_price_{card_id}")],
-            [InlineKeyboardButton(text="✏️ Описание", callback_data=f"edit_desc_{card_id}")],
-            [InlineKeyboardButton(text="✏️ Изображение", callback_data=f"edit_img_{card_id}")],
-        ]
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        
-        image_info = "🖼️ Фото" if image_file_id else f"{image_url or 'Нет'}"
-        
-        await safe_edit_message(
-            callback,
-            f"<b>Редактирование:</b> {title}\n\n"
-            f"💰 Цена: {price}\n"
-            f"📝 Описание: {description or 'Нет'}\n"
-            f"📸 Изображение: {image_info}\n\n"
-            "Выберите поле:",
-            reply_markup
-        )
-    except Exception as e:
-        error_logger.log_error("Начать редактирование карточки", e, callback.from_user.id)
-
-@admin_router.callback_query(F.data.startswith("edit_title_"))
-async def edit_card_title(callback: CallbackQuery, state: FSMContext):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_id = int(callback.data.split('_')[-1])
-        
-        temp_edit_data[callback.from_user.id] = {
-            'card_id': card_id,
-            'field': 'title'
-        }
-        
-        await callback.message.answer("Введите новое название:")
-        await state.set_state(AdminStates.edit_card_field)
-    except Exception as e:
-        error_logger.log_error("Редактировать название", e, callback.from_user.id)
-
-@admin_router.callback_query(F.data.startswith("edit_price_"))
-async def edit_card_price(callback: CallbackQuery, state: FSMContext):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_id = int(callback.data.split('_')[-1])
-        
-        temp_edit_data[callback.from_user.id] = {
-            'card_id': card_id,
-            'field': 'price'
-        }
-        
-        await callback.message.answer("Введите новую цену:")
-        await state.set_state(AdminStates.edit_card_field)
-    except Exception as e:
-        error_logger.log_error("Редактировать цену", e, callback.from_user.id)
-
-@admin_router.callback_query(F.data.startswith("edit_desc_"))
-async def edit_card_description(callback: CallbackQuery, state: FSMContext):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_id = int(callback.data.split('_')[-1])
-        
-        temp_edit_data[callback.from_user.id] = {
-            'card_id': card_id,
-            'field': 'description'
-        }
-        
-        await callback.message.answer("Введите новое описание (или 'удалить' для очистки):")
-        await state.set_state(AdminStates.edit_card_field)
-    except Exception as e:
-        error_logger.log_error("Редактировать описание", e, callback.from_user.id)
-
-@admin_router.callback_query(F.data.startswith("edit_img_"))
-async def edit_card_image(callback: CallbackQuery, state: FSMContext):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_id = int(callback.data.split('_')[-1])
-        
-        temp_edit_data[callback.from_user.id] = {
-            'card_id': card_id,
-            'field': 'image'
-        }
-        
-        await callback.message.answer("Отправьте новое фото или эмодзи (или 'удалить'):")
-        await state.set_state(AdminStates.edit_card_field)
-    except Exception as e:
-        error_logger.log_error("Редактировать изображение", e, callback.from_user.id)
-
-@admin_router.message(AdminStates.edit_card_field)
-async def save_card_edit(message: Message, state: FSMContext):
-    try:
-        user_id = message.from_user.id
-        if not await is_admin(user_id):
-            await message.answer("❌ Нет доступа")
-            await state.clear()
-            return
-        
-        if user_id not in temp_edit_data:
-            await message.answer("❌ Сессия утеряна")
-            await state.clear()
-            return
-        
-        data = temp_edit_data[user_id]
-        card_id = data['card_id']
-        field = data['field']
-        
-        success = False
-        
-        if field == 'image':
-            if message.photo:
-                photo = message.photo[-1]
-                success = await update_tariff_card(
-                    card_id,
-                    image_file_id=photo.file_id,
-                    image_url="🖼️"
-                )
-            elif message.text and message.text.lower() in ['удалить', 'пропустить']:
-                success = await update_tariff_card(
-                    card_id,
-                    image_url='',
-                    image_file_id=''          # <-- виправлено з None
-                )
-            else:
-                success = await update_tariff_card(
-                    card_id,
-                    image_url=message.text,
-                    image_file_id=''
-                )
+# ========== УНІВЕРСАЛЬНИЙ ХЕНДЛЕР СКАСУВАННЯ ==========
+@router.message(Command("cancel", "скасувати", "отмена") | F.text.icontains("скасувати"))
+@router.callback_query(F.data == "cancel_action")
+async def cancel_action(target: Union[Message, CallbackQuery], state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        if isinstance(target, CallbackQuery):
+            await target.answer("Ви не перебуваєте в активному процесі.", show_alert=True)
+        return
+    
+    await state.clear()
+    user_id = target.from_user.id
+    
+    if await is_admin(user_id):
+        if isinstance(target, CallbackQuery):
+            await safe_edit_message(target, "✅ Дію скасовано. Повертаємось до адмін-панелі.", get_admin_keyboard())
         else:
-            value = message.text.strip()
-            
-            if field == 'description' and value.lower() in ['удалить', 'пропустить']:
-                value = ''
-            
-            if field in ['title', 'price'] and not value:
-                await message.answer("❌ Поле не может быть пустым")
-                return
-            
-            update_data = {field: value}
-            success = await update_tariff_card(card_id, **update_data)
-        
-        if success:
-            card = await get_tariff_card(card_id)
-            if card:
-                _, title, price, description, image_url, image_file_id, card_type = card
-                
-                keyboard = [
-                    [InlineKeyboardButton(text="✏️ Название", callback_data=f"edit_title_{card_id}")],
-                    [InlineKeyboardButton(text="✏️ Цена", callback_data=f"edit_price_{card_id}")],
-                    [InlineKeyboardButton(text="✏️ Описание", callback_data=f"edit_desc_{card_id}")],
-                    [InlineKeyboardButton(text="✏️ Изображение", callback_data=f"edit_img_{card_id}")],
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_cards_{card_type}")]
-                ]
-                reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-                
-                image_info = "🖼️ Фото" if image_file_id else f"{image_url or 'Нет'}"
-                
-                await message.answer(
-                    f"✅ Обновлено!\n\n"
-                    f"<b>Редактирование:</b> {title}\n"
-                    f"💰 Цена: {price}\n"
-                    f"📝 Описание: {description or 'Нет'}\n"
-                    f"📸 Изображение: {image_info}",
-                    reply_markup=reply_markup
-                )
-            else:
-                await message.answer("✅ Обновлено!")
+            await safe_send_message(target.chat.id, "✅ Дію скасовано. Повертаємось до адмін-панелі.", get_admin_keyboard(), user_id=user_id)
+    else:
+        if isinstance(target, CallbackQuery):
+            await safe_edit_message(target, "✅ Дію скасовано.", get_main_reply_keyboard())
         else:
-            await message.answer("❌ Ошибка обновления")
-        
-        if user_id in temp_edit_data:
-            del temp_edit_data[user_id]
-        await state.clear()
-        
-    except Exception as e:
-        error_logger.log_error("Сохранить редактирование", e, message.from_user.id)
-        await state.clear()
+            await safe_send_message(target.chat.id, "✅ Дію скасовано.", get_main_reply_keyboard(), user_id=user_id)
 
-@admin_router.callback_query(F.data.startswith("delete_card_"))
+# ========== АДМІН: ПЕРЕГЛЯД ТА ВИДАЛЕННЯ КАРТОК ==========
+@admin_router.callback_query(F.data.startswith("admin_view_cards:"))
+async def admin_view_cards(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    card_type = callback.data.split(":")[1]
+    type_names = {'tariff': '💰 Тарифи', 'super_power': '💪 Супер сили', 'roaming': '🌍 Роумінг'}
+    
+    await callback.answer()
+    await display_tariff_cards(callback, card_type, type_names.get(card_type, 'Картки'), callback.from_user.id)
+
+@admin_router.callback_query(F.data.startswith("admin_delete_card:"))
 async def admin_delete_card(callback: CallbackQuery):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_id = int(callback.data.split('_')[-1])
-        success = await delete_tariff_card(card_id)
-        
-        if success:
-            await safe_edit_message(callback, "✅ Карточка удалена")
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    card_id = int(callback.data.split(":")[1])
+    success = await delete_tariff_card(card_id)
+    
+    if success:
+        await callback.answer("✅ Картку деактивовано (видалено)", show_alert=True)
+        await callback.message.answer("🔄 Оновлюємо список...", reply_markup=get_admin_keyboard())
+    else:
+        await callback.answer("❌ Не вдалося видалити картку", show_alert=True)
+
+# ========== АДМІН: РЕДАГУВАННЯ КАРТОК (FSM) ==========
+@admin_router.callback_query(F.data.startswith("admin_edit_card:"))
+async def admin_edit_card_menu(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    card_id = int(callback.data.split(":")[1])
+    card = await get_tariff_card(card_id)
+    if not card:
+        return await callback.answer("❌ Картку не знайдено", show_alert=True)
+    
+    await state.update_data(card_id=card_id)
+    
+    keyboard = [
+        [InlineKeyboardButton(text="✏️ Назва", callback_data="admin_edit_field:title")],
+        [InlineKeyboardButton(text="✏️ Ціна", callback_data="admin_edit_field:price")],
+        [InlineKeyboardButton(text="✏️ Опис", callback_data="admin_edit_field:description")],
+        [InlineKeyboardButton(text="✏️ Зображення", callback_data="admin_edit_field:image")],
+        [InlineKeyboardButton(text="🔙 Назад до списку", callback_data=f"admin_view_cards:{card[6]}")]
+    ]
+    
+    await safe_edit_message(callback, f"⚙️ <b>Редагування:</b> {card[1]}\n\nОберіть поле для зміни:", InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+@admin_router.callback_query(F.data.startswith("admin_edit_field:"))
+async def admin_edit_field_prompt(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    field = callback.data.split(":")[1]
+    data = await state.get_data()
+    if not data.get('card_id'):
+        return await callback.answer("❌ Помилка сесії. Почніть спочатку.", show_alert=True)
+    
+    await state.update_data(edit_field=field)
+    
+    prompts = {
+        'title': "Введіть нову <b>назву</b>:",
+        'price': "Введіть нову <b>ціну</b>:",
+        'description': "Введіть новий <b>опис</b> (або 'пропустити' для очищення):",
+        'image': "Надішліть нове <b>фото</b> або текст (емодзі/посилання), або 'пропустити' для видалення:"
+    }
+    
+    await callback.message.answer(prompts.get(field, "Введіть нове значення:"), reply_markup=get_cancel_keyboard())
+    await state.set_state(AdminStates.edit_card)
+    await callback.answer()
+
+@admin_router.message(AdminStates.edit_card)
+async def admin_save_card_edit(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not await is_admin(user_id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    card_id = data.get('card_id')
+    field = data.get('edit_field')
+    
+    if not card_id or not field:
+        await message.answer("❌ Помилка сесії. Почніть редагування спочатку.")
+        await state.clear()
+        return
+
+    update_kwargs = {}
+    if field == 'image':
+        if message.photo:
+            update_kwargs['image_file_id'] = message.photo[-1].file_id
+            update_kwargs['image_url'] = '🖼️'
+        elif message.text and message.text.strip().lower() in ['пропустити', 'skip', 'видалити', '-']:
+            update_kwargs['image_file_id'] = ''
+            update_kwargs['image_url'] = ''
         else:
-            await safe_edit_message(callback, "❌ Ошибка удаления")
-    except Exception as e:
-        error_logger.log_error("Удалить карточку", e, callback.from_user.id)
+            update_kwargs['image_url'] = message.text.strip()
+            update_kwargs['image_file_id'] = ''
+    else:
+        value = message.text.strip()
+        if field == 'description' and value.lower() in ['пропустити', 'skip', 'видалити', '-']:
+            value = ''
+        if field in ['title', 'price'] and not value:
+            await message.answer("❌ Це поле не може бути порожнім. Спробуйте ще раз:", reply_markup=get_cancel_keyboard())
+            return
+        update_kwargs[field] = value
 
-@admin_router.callback_query(F.data.startswith("back_cards_"))
-async def back_to_cards_admin(callback: CallbackQuery):
-    try:
-        card_type = callback.data.split('_')[-1]
-        type_names = {
-            'tariff': 'Тарифы',
-            'super_power': 'Супер силы',
-            'roaming': 'Роуминг'
-        }
-        title = type_names.get(card_type, 'Карточки')
-        await display_tariff_cards(callback.message, card_type, title)
-    except Exception as e:
-        error_logger.log_error("Назад к карточкам (админ)", e, callback.from_user.id)
+    result = await update_tariff_card(card_id, **update_kwargs)
+    if result:
+        await message.answer("✅ Поле успішно оновлено!", reply_markup=get_admin_keyboard())
+    else:
+        await message.answer("❌ Помилка при оновленні бази даних.", reply_markup=get_admin_keyboard())
+    
+    await state.clear()
 
-# ========== АДМИН: ДОБАВЛЕНИЕ КАРТОЧЕК ==========
+# ========== АДМІН: ДОДАВАННЯ КАРТОК (FSM - ВИПРАВЛЕНО) ==========
 @admin_router.callback_query(F.data.startswith("admin_add_card:"))
 async def admin_add_card_start(callback: CallbackQuery, state: FSMContext):
-    try:
-        if not await is_admin(callback.from_user.id):
-            await callback.answer("❌ Нет доступа")
-            return
-        
-        card_type = callback.data.split(':')[1]
-        type_names = {
-            'tariff': 'тариф',
-            'super_power': 'супер силу',
-            'roaming': 'роуминг'
-        }
-        
-        temp_card_data[callback.from_user.id] = {
-            'card_type': card_type,
-            'step': 0
-        }
-        
-        await callback.message.answer(f"Введите название {type_names.get(card_type, 'карточки')}:")
-        await state.set_state(AdminStates.add_card)
-    except Exception as e:
-        error_logger.log_error("Начать добавление карточки", e, callback.from_user.id)
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    card_type = callback.data.split(":")[1]
+    type_names = {'tariff': 'тарифу', 'super_power': 'супер сили', 'roaming': 'роумінгу'}
+    
+    await state.update_data(card_type=card_type, step=1)
+    await callback.message.answer(
+        f"➕ <b>Додавання: {type_names.get(card_type, 'картки')}</b>\n\n"
+        f"Введіть <b>назву</b> (або напишіть /cancel для скасування):",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(AdminStates.add_card)
+    await callback.answer()
 
 @admin_router.message(AdminStates.add_card)
 async def admin_add_card_process(message: Message, state: FSMContext):
-    try:
-        user_id = message.from_user.id
-        if not await is_admin(user_id):
-            await message.answer("❌ Нет доступа")
-            await state.clear()
-            return
-        
-        if user_id not in temp_card_data:
-            await message.answer("❌ Сессия утеряна")
-            await state.clear()
-            return
-        
-        data = temp_card_data[user_id]
-        step = data.get('step', 0)
-        
-        if step == 0:
-            if not message.text.strip():
-                await message.answer("❌ Название не может быть пустым")
-                return
-            
-            data['title'] = message.text.strip()
-            data['step'] = 1
-            await message.answer("Введите цену:")
-        
-        elif step == 1:
-            if not message.text.strip():
-                await message.answer("❌ Цена не может быть пустой")
-                return
-            
-            data['price'] = message.text.strip()
-            data['step'] = 2
-            await message.answer("Введите описание (или 'пропустить'):")
-        
-        elif step == 2:
-            description = message.text.strip()
-            if description.lower() == 'пропустить':
-                description = ''
-            
-            data['description'] = description
-            data['step'] = 3
-            await message.answer("Отправьте фото или эмодзи (или 'пропустить'):")
-        
-        elif step == 3:
-            card_type = data.get('card_type', 'tariff')
-            image_url = ""
-            image_file_id = ""
-            
-            if message.photo:
-                photo = message.photo[-1]
-                image_file_id = photo.file_id
-                image_url = "🖼️"
-            elif message.text and message.text.strip().lower() != 'пропустить':
-                image_url = message.text.strip()
-            
-            card_id = await add_tariff_card(
-                data['title'],
-                data['price'],
-                data['description'],
-                image_url,
-                image_file_id,
-                card_type
-            )
-            
-            type_display = {
-                'tariff': 'Тариф',
-                'super_power': 'Супер силу',
-                'roaming': 'Роуминг'
-            }.get(card_type, 'Карточку')
-            
-            if card_id:
-                await message.answer(
-                    f"✅ {type_display} '{data['title']}' добавлен!\nID: {card_id}",
-                    reply_markup=get_main_reply_keyboard()
-                )
-            else:
-                await message.answer(
-                    "❌ Ошибка добавления",
-                    reply_markup=get_main_reply_keyboard()
-                )
-            
-            if user_id in temp_card_data:
-                del temp_card_data[user_id]
-            await state.clear()
-            
-    except Exception as e:
-        error_logger.log_error("Добавить карточку", e, message.from_user.id)
+    user_id = message.from_user.id
+    if not await is_admin(user_id):
         await state.clear()
+        return
+
+    data = await state.get_data()
+    step = data.get('step', 1)
+    card_type = data.get('card_type', 'tariff')
+
+    if step == 1:  # Назва
+        if not message.text or not message.text.strip():
+            await message.answer("❌ Назва не може бути порожньою. Спробуйте ще раз:", reply_markup=get_cancel_keyboard())
+            return
+        await state.update_data(title=message.text.strip(), step=2)
+        await message.answer("💰 Введіть <b>ціну</b> (наприклад, '150 грн/міс'):", reply_markup=get_cancel_keyboard())
+        
+    elif step == 2:  # Ціна
+        if not message.text or not message.text.strip():
+            await message.answer("❌ Ціна не може бути порожньою. Спробуйте ще раз:", reply_markup=get_cancel_keyboard())
+            return
+        await state.update_data(price=message.text.strip(), step=3)
+        await message.answer("📝 Введіть <b>опис</b> (або напишіть 'пропустити'):", reply_markup=get_cancel_keyboard())
+        
+    elif step == 3:  # Опис
+        description = message.text.strip() if message.text else ''
+        if description.lower() in ['пропустити', 'skip', '-']:
+            description = ''
+        await state.update_data(description=description, step=4)
+        await message.answer("🖼️ Надішліть <b>фото</b> або напишіть емодзі/посилання (або 'пропустити'):", reply_markup=get_cancel_keyboard())
+        
+    elif step == 4:  # Зображення та збереження
+        image_url, image_file_id = '', ''
+        if message.photo:
+            image_file_id = message.photo[-1].file_id
+            image_url = '🖼️'
+        elif message.text and message.text.strip().lower() not in ['пропустити', 'skip', '-']:
+            image_url = message.text.strip()
+
+        card_id = await add_tariff_card(data['title'], data['price'], data['description'], image_url, image_file_id, card_type)
+        type_display = {'tariff': 'Тариф', 'super_power': 'Супер силу', 'roaming': 'Роумінг'}.get(card_type, 'Картку')
+
+        if card_id:
+            await message.answer(f"✅ {type_display} '<b>{data['title']}</b>' успішно додано! (ID: {card_id})", reply_markup=get_admin_keyboard())
+        else:
+            await message.answer("❌ Помилка при додаванні до бази даних.", reply_markup=get_admin_keyboard())
+
+        await state.clear()
+
+# ========== АДМІН: ВІДДІЛИ ==========
+@admin_router.callback_query(F.data == "admin_sections_menu")
+async def admin_sections_menu(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    keyboard = [
+        [InlineKeyboardButton(text="➕ Додати відділ", callback_data="admin_add_section")],
+        [InlineKeyboardButton(text="✏️ Редагувати відділи", callback_data="admin_edit_sections")],
+        [InlineKeyboardButton(text="🗑️ Видалити відділ", callback_data="admin_delete_section")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_admin")]
+    ]
+    await safe_edit_message(callback, "📂 <b>Управління відділами</b>\nОберіть дію:", InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+@admin_router.callback_query(F.data == "admin_edit_sections")
+async def admin_edit_sections_list(callback: CallbackQuery):
+    sections = await get_sections()
+    if not sections:
+        return await callback.message.answer("📭 Поки немає жодного відділу.", reply_markup=get_admin_keyboard())
+
+    kb = [[InlineKeyboardButton(text=f"✏️ {name}", callback_data=f"edit_section_{section_id}")] for section_id, name, _, _ in sections]
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_sections_menu")])
+    await safe_edit_message(callback, "✏️ <b>Редагування відділів</b>\n\nОберіть відділ:", InlineKeyboardMarkup(inline_keyboard=kb))
+
+@admin_router.callback_query(F.data.startswith("edit_section_"))
+async def edit_section_start(callback: CallbackQuery, state: FSMContext):
+    section_id = int(callback.data.split("_")[-1])
+    section = await get_section(section_id)
+    if not section:
+        return await callback.answer("Відділ не знайдено", show_alert=True)
+    
+    await state.update_data(section_id=section_id, step='name')
+    await callback.message.answer(f"Редагуємо відділ: <b>{section[1]}</b>\n\nВведіть нову назву (або /cancel для скасування):", reply_markup=get_cancel_keyboard())
+    await state.set_state(AdminStates.edit_section)
+    await callback.answer()
+
+@admin_router.message(AdminStates.edit_section)
+async def process_edit_section(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not await is_admin(user_id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    step = data.get('step')
+
+    if step == 'name':
+        await state.update_data(name=message.text.strip(), step='description')
+        await message.answer("Введіть новий <b>опис</b> (або 'пропустити'):", reply_markup=get_cancel_keyboard())
+    elif step == 'description':
+        desc = message.text.strip() if message.text.strip().lower() not in ['пропустити', 'skip'] else ''
+        await state.update_data(description=desc, step='content')
+        await message.answer("Введіть новий <b>контент</b> (або 'пропустити'):", reply_markup=get_cancel_keyboard())
+    elif step == 'content':
+        content = message.text.strip() if message.text.strip().lower() not in ['пропустити', 'skip'] else ''
+        success = await update_section(section_id, data['name'], data['description'], content)
+        
+        if success:
+            await message.answer("✅ Відділ успішно оновлено!", reply_markup=get_admin_keyboard())
+        else:
+            await message.answer("❌ Помилка оновлення.", reply_markup=get_admin_keyboard())
+        await state.clear()
+
+@admin_router.callback_query(F.data == "admin_delete_section")
+async def admin_delete_section_list(callback: CallbackQuery):
+    sections = await get_sections()
+    if not sections:
+        return await callback.message.answer("📭 Поки немає жодного відділу.", reply_markup=get_admin_keyboard())
+
+    kb = [[InlineKeyboardButton(text=f"🗑️ {name}", callback_data=f"delete_section_confirm_{section_id}")] for section_id, name, _, _ in sections]
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_sections_menu")])
+    await safe_edit_message(callback, "🗑️ <b>Видалення відділів</b>\n\nОберіть відділ для видалення:", InlineKeyboardMarkup(inline_keyboard=kb))
+
+@admin_router.callback_query(F.data.startswith("delete_section_confirm_"))
+async def delete_section_confirm(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    section_id = int(callback.data.split("_")[-1])
+    success = await delete_section(section_id)
+    
+    if success:
+        await callback.answer("✅ Відділ успішно видалено.", show_alert=True)
+        await callback.message.answer("Повертаємось в адмін-панель...", reply_markup=get_admin_keyboard())
+    else:
+        await callback.answer("❌ Не вдалося видалити відділ.", show_alert=True)
+
+# ========== АДМІН: РОЗСИЛКА (100% РЕАЛІЗОВАНО) ==========
+@admin_router.callback_query(F.data == "admin_broadcast")
+async def broadcast_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    await state.clear()
+    await callback.message.answer(
+        "📢 <b>Налаштування розсилки</b>\n\n"
+        "Надішліть повідомлення, яке потрібно розіслати всім користувачам.\n"
+        "Це може бути просто текст, або фото з підписом.\n\n"
+        "Для скасування натисніть кнопку нижче або напишіть /cancel",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(AdminStates.broadcast)
+    await callback.answer()
+
+@admin_router.message(AdminStates.broadcast)
+async def broadcast_receive(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not await is_admin(user_id):
+        await state.clear()
+        return
+
+    # Зберігаємо дані розсилки
+    data = {}
+    if message.text:
+        data['text'] = message.text
+    if message.caption:
+        data['text'] = message.caption
+    if message.photo:
+        data['photo_id'] = message.photo[-1].file_id
+    
+    if not data.get('text') and not data.get('photo_id'):
+        await message.answer("❌ Повідомлення не може бути порожнім. Надішліть текст або фото.", reply_markup=get_cancel_keyboard())
+        return
+
+    await state.update_data(**data)
+    
+    # Клавіатура підтвердження
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Підтвердити та надіслати", callback_data="broadcast_confirm")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")]
+    ])
+    
+    await message.answer("👀 <b>Попередній перегляд розсилки:</b>\n\nНатисніть 'Підтвердити', щоб надіслати це повідомлення всім активним користувачам.", reply_markup=kb)
+    
+    # Показуємо, як це виглядатиме
+    await message.answer("👇 <b>Так це виглядатиме для користувачів:</b>")
+    if data.get('photo_id'):
+        await message.answer_photo(photo=data['photo_id'], caption=data.get('text', ''))
+    else:
+        await message.answer(data.get('text', 'Порожнє повідомлення'))
+
+@admin_router.callback_query(F.data == "broadcast_confirm")
+async def broadcast_execute(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("❌ Немає доступу", show_alert=True)
+    
+    await callback.answer("⏳ Розсилка розпочата... Це може зайняти деякий час.")
+    data = await state.get_data()
+    users = await get_all_users()
+    
+    if not users:
+        await state.clear()
+        return await callback.message.answer("❌ Немає активних користувачів для розсилки.", reply_markup=get_admin_keyboard())
+    
+    success_count = 0
+    fail_count = 0
+    
+    # Повідомлення про прогрес
+    progress_msg = await callback.message.answer(f"📢 Розсилка... 0/{len(users)}")
+    
+    for i, user_id in enumerate(users):
+        try:
+            if data.get('photo_id'):
+                await bot.send_photo(user_id, photo=data['photo_id'], caption=data.get('text', ''))
+            else:
+                await bot.send_message(user_id, text=data.get('text', ''))
+            success_count += 1
+        except Exception:
+            # Ігноруємо помилки (наприклад, користувач заблокував бота), щоб не зупиняти розсилку
+            fail_count += 1
+        
+        # Оновлюємо прогрес кожні 10 користувачів, щоб не отримати flood wait
+        if i % 10 == 0:
+            try:
+                await progress_msg.edit_text(
+                    f"📢 Розсилка...\n"
+                    f"Оброблено: {i+1}/{len(users)}\n"
+                    f"✅ Успішно: {success_count}\n"
+                    f"❌ Помилок (блок/видалення): {fail_count}"
+                )
+            except Exception:
+                pass # Ігноруємо помилки редагування повідомлення під час flood control
+    
+    await state.clear()
+    
+    # Фінальний звіт
+    final_report = (
+        f"✅ <b>Розсилку завершено!</b>\n\n"
+        f"👥 Всього отримувачів: {len(users)}\n"
+        f"✅ Успішно доставлено: {success_count}\n"
+        f"❌ Не доставлено (користувач заблокував бота або видалив акаунт): {fail_count}"
+    )
+    
+    try:
+        await progress_msg.edit_text(final_report, reply_markup=get_admin_keyboard())
+    except Exception:
+        await callback.message.answer(final_report, reply_markup=get_admin_keyboard())
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
@@ -1252,7 +975,7 @@ async def main():
         error_logger.logger.info("🚀 Бот запускається...")
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
-        error_logger.log_error("Критическая ошибка запуска", e)
+        error_logger.log_error("Критична помилка запуску", e)
         raise
 
 if __name__ == "__main__":
