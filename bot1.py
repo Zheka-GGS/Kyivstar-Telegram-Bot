@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import traceback
+import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
@@ -63,8 +64,12 @@ class ErrorLogger:
 error_logger = ErrorLogger()
 
 # ========== КОНФИГУРАЦИЯ БОТА ==========
-ADMIN_PASSWORD = "your_secure_password"
-BOT_TOKEN = "your_bot_token_here"
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "your_secure_password_change_me")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+
+if not BOT_TOKEN or BOT_TOKEN == "your_bot_token_here":
+    raise ValueError("❌ BOT_TOKEN не знайдено! Встанови змінну оточення BOT_TOKEN")
 
 # ========== СОСТОЯНИЯ FSM ==========
 class AdminStates(StatesGroup):
